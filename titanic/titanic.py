@@ -1,65 +1,75 @@
+"""Train and evaluate a Titanic classifier without fitting on held-out data."""
+
+import argparse
+from pathlib import Path
+
 import pandas as pd
-
-#importing training and test data
-training_data = pd.read_csv("train.csv")
-test_data = pd.read_csv("test.csv")
-test_ids = test_data["PassengerId"]
-
-#function for remove unnecessary columns from data
-def clean(data):
-    data = data.drop(["Ticket", "Cabin", "Name", "PassengerId"], axis=1)
-    
-    columns = ["SibSp", "Parch", "Fare", "Age"]
-    
-    for col in columns:
-        data[col].fillna(data[col].median(), inplace=True)
-        
-    data.Embarked.fillna("U", inplace=True)
-    
-    return data
-
-#cleaning unnecessary columns from each data
-training_data = clean(training_data)
-test_data = clean(test_data)
-
-from sklearn import preprocessing
-label = preprocessing.LabelEncoder()
-
-columns = ["Sex", "Embarked"]
-
-#change string data with numerical data (e.g.) male: 0, female:1
-for col in columns:
-    training_data[col] = label.fit_transform(training_data[col])
-    test_data[col] = label.fit_transform(test_data[col])
-
-#importing LogisticRegression model for predictions
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-
-#setting parameters
-y = training_data["Survived"]
-X = training_data.drop("Survived", axis=1)
-
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=45)
-
-clf = LogisticRegression(random_state=0, max_iter=1000).fit(X_train, y_train)
-
-#making prediction
-predictions = clf.predict(X_val)
-
 from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-accuracy_score(y_val, predictions)
 
-#prinitng our accuracy score
-print(accuracy_score(y_val, predictions))
+NUMERIC_FEATURES = ["Pclass", "SibSp", "Parch", "Fare", "Age"]
+CATEGORICAL_FEATURES = ["Sex", "Embarked"]
 
-submission_preds = clf.predict(test_data)
 
-#defining keys and values for submission
-df = pd.DataFrame({"PassengerId":test_ids.values,
-                   "Survived": submission_preds,})
+def build_pipeline():
+    numeric = Pipeline([
+        ("impute", SimpleImputer(strategy="median")),
+        ("scale", StandardScaler()),
+    ])
+    categorical = Pipeline([
+        ("impute", SimpleImputer(strategy="most_frequent")),
+        ("encode", OneHotEncoder(handle_unknown="ignore")),
+    ])
+    preprocess = ColumnTransformer([
+        ("numeric", numeric, NUMERIC_FEATURES),
+        ("categorical", categorical, CATEGORICAL_FEATURES),
+    ])
+    return Pipeline([
+        ("preprocess", preprocess),
+        ("classify", LogisticRegression(random_state=0, max_iter=1000)),
+    ])
 
-#creating our submission file
-df.to_csv("submission.csv", index=False)
 
+def train_and_predict(training_data, test_data):
+    features = training_data.drop(columns="Survived")
+    target = training_data["Survived"]
+    x_train, x_val, y_train, y_val = train_test_split(
+        features, target, test_size=0.2, random_state=45, stratify=target
+    )
+    model = build_pipeline()
+    model.fit(x_train, y_train)
+    score = accuracy_score(y_val, model.predict(x_val))
+
+    # Refit on all labelled rows only after measuring held-out accuracy.
+    model.fit(features, target)
+    predictions = model.predict(test_data)
+    submission = pd.DataFrame({
+        "PassengerId": test_data["PassengerId"].to_numpy(),
+        "Survived": predictions,
+    })
+    return score, submission
+
+
+def main():
+    data_dir = Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--train", type=Path, default=data_dir / "train.csv")
+    parser.add_argument("--test", type=Path, default=data_dir / "test.csv")
+    parser.add_argument("--output", type=Path, default=data_dir / "submission.csv")
+    args = parser.parse_args()
+    score, submission = train_and_predict(
+        pd.read_csv(args.train), pd.read_csv(args.test)
+    )
+    submission.to_csv(args.output, index=False)
+    print(f"Validation accuracy: {score:.4f}")
+    print(f"Saved {len(submission)} predictions to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
